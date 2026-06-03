@@ -10,6 +10,8 @@ import { Button } from "@/presentation/components/ui/Button";
 import { AdminIcon } from "@/presentation/components/admin/AdminIcons";
 
 const LOCAL_IMPORT_FOLDER_KEY = "ivory-admin.localImport.folderPath";
+const DEFAULT_IMPORT_DESTINATION_FOLDER_URL =
+  "https://drive.google.com/drive/folders/1oZISDJb3U9L7mWRvObXTdOz9ev4xAMVp?usp=drive_link";
 
 function SummaryTile({
   label,
@@ -41,8 +43,8 @@ export function AdminImportContent() {
       ? ""
       : window.localStorage.getItem(LOCAL_IMPORT_FOLDER_KEY) ?? ""
   );
-  const [destinationFolderLink, setDestinationFolderLink] = useState(() =>
-    typeof window === "undefined" ? "" : ""
+  const [destinationFolderLink, setDestinationFolderLink] = useState(
+    DEFAULT_IMPORT_DESTINATION_FOLDER_URL
   );
   const [validationError, setValidationError] = useState<string | null>(null);
   const {

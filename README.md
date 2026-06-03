@@ -63,7 +63,7 @@ Use the full JSON contents for `FIREBASE_SERVICE_ACCOUNT_JSON` and `GOOGLE_SERVI
 
 After a successful local-folder product import (`/admin/import`), the importer calls `generateQuoteInternal` for every product whose status is `CREATE` or `UPDATE`. During import, the importer also looks for a `Returned/Unused Goods` sheet in the imported CAD Details workbook. When present, those returned-goods values are applied to the quotation generated during that same import.
 
-Each generated quotation is uploaded to the product's `Quotations` folder as two copies named `Quo-{styleNo}-{clientCode}-{currentDate}.xlsx` and `{styleNo}-{clientCode}-{currentDate}.xlsx`; the client code is read from the product HTML. Quotation generation failures are reported in the import summary as warnings and do not abort the import.
+Each generated quotation is uploaded to the product's `Quo-Dc` folder as two copies named `Quo-{styleNo}-{clientCode}-{currentDate}.xlsx` and `{styleNo}-{clientCode}-{currentDate}.xlsx`; the client code is read from the product HTML. Quotation generation failures are reported in the import summary as warnings and do not abort the import.
 
 ## Learn More
 

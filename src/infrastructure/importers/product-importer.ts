@@ -612,6 +612,7 @@ function changedProductFields(
 // -------------------------
 type DriveFile = { id: string; name: string; mimeType?: string; pathParts?: string[] };
 const DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder";
+const QUOTE_DRIVE_FOLDER_NAME = "Quo-Dc";
 const HTML_MIMES = new Set(["text/html", "application/xhtml+xml"]);
 
 async function listDriveFiles(
@@ -1306,7 +1307,7 @@ async function archiveQuoteToDrive(
   const quotesFolderId = await ensureDriveFolder(
     drive,
     productFolderId,
-    "Quotations"
+    QUOTE_DRIVE_FOLDER_NAME
   );
   for (const fileName of fileNames) {
     await uploadBufferToDriveFolder(
