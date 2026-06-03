@@ -9,7 +9,6 @@ export const PERMISSIONS = [
   "goldRate.read",
   "goldRate.write",
   "imports.run",
-  "syncLogs.read",
   "users.manage",
   "settings.manage",
 ] as const;
@@ -65,7 +64,6 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
   "goldRate.read": "View gold rate",
   "goldRate.write": "Edit gold rate",
   "imports.run": "Run imports and sync",
-  "syncLogs.read": "View sync logs",
   "users.manage": "Manage users",
   "settings.manage": "Manage settings",
 };

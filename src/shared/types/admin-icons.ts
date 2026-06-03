@@ -5,7 +5,6 @@ export type AdminIconName =
   | "rates"
   | "goldRate"
   | "bulkImport"
-  | "syncLogs"
   | "users"
   | "settings"
   | "signOut"

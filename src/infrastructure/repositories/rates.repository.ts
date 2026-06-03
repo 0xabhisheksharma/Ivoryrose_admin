@@ -14,22 +14,63 @@ type RateDoc = {
   updatedAt: string | null;
 };
 
+const DEFAULT_PAGE_SIZE = 100;
+const MAX_PAGE_SIZE = 500;
+
+export type ListRatesPaginatedResult = {
+  items: RateDoc[];
+  nextCursor: string | null;
+};
+
+function docToRateDoc(
+  d: FirebaseFirestore.DocumentSnapshot<FirebaseFirestore.DocumentData>
+): RateDoc {
+  const data = d.data() ?? {};
+  return {
+    rateId: d.id,
+    TYP: data.TYP ?? "",
+    SHP: data.SHP ?? "",
+    Band: data.Band ?? "",
+    Rs_Rate: (data.Rs_Rate as string | number | null | undefined) ?? null,
+    updatedAt: serializeTimestamp(data.updatedAt),
+  };
+}
+
 export async function listRates(): Promise<RateDoc[]> {
   const admin = getFirebaseAdmin();
   const db = admin.firestore();
   const snapshot = await db.collection(COLLECTION_RATE).get();
-  return snapshot.docs.map((d) => {
-    const data = d.data();
-    const updatedAt = data.updatedAt;
-    return {
-      rateId: d.id,
-      TYP: data.TYP ?? "",
-      SHP: data.SHP ?? "",
-      Band: data.Band ?? "",
-      Rs_Rate: (data.Rs_Rate as string | number | null | undefined) ?? null,
-      updatedAt: serializeTimestamp(updatedAt),
-    };
-  });
+  return snapshot.docs.map((d) => docToRateDoc(d));
+}
+
+export async function listRatesPaginated(options: {
+  limit?: number;
+  cursor?: string | null;
+} = {}): Promise<ListRatesPaginatedResult> {
+  const admin = getFirebaseAdmin();
+  const db = admin.firestore();
+  const limit = Math.min(
+    Math.max(1, options.limit ?? DEFAULT_PAGE_SIZE),
+    MAX_PAGE_SIZE
+  );
+
+  let query: FirebaseFirestore.Query<FirebaseFirestore.DocumentData> = db
+    .collection(COLLECTION_RATE)
+    .orderBy(admin.firestore.FieldPath.documentId())
+    .limit(limit + 1);
+
+  if (options.cursor?.trim()) {
+    query = query.startAfter(options.cursor.trim());
+  }
+
+  const snapshot = await query.get();
+  const docs = snapshot.docs.slice(0, limit);
+  const hasMore = snapshot.docs.length > limit;
+
+  return {
+    items: docs.map((d) => docToRateDoc(d)),
+    nextCursor: hasMore && docs.length > 0 ? docs[docs.length - 1].id : null,
+  };
 }
 
 export async function countRates(): Promise<number> {
@@ -45,15 +86,7 @@ export async function getRate(rateId: string): Promise<RateDoc | null> {
   const ref = db.collection(COLLECTION_RATE).doc(rateId);
   const snap = await ref.get();
   if (!snap.exists) return null;
-  const data = snap.data() ?? {};
-  return {
-    rateId: snap.id,
-    TYP: data.TYP ?? "",
-    SHP: data.SHP ?? "",
-    Band: data.Band ?? "",
-    Rs_Rate: (data.Rs_Rate as string | number | null | undefined) ?? null,
-    updatedAt: serializeTimestamp(data.updatedAt),
-  };
+  return docToRateDoc(snap);
 }
 
 export async function updateRate(
@@ -109,6 +142,10 @@ type RateWriteDoc = {
   Rs_Rate: string | null;
 };
 
+type RateWriteDocWithId = RateWriteDoc & {
+  rateId: string;
+};
+
 export async function createRates(docs: RateWriteDoc[]): Promise<number> {
   const admin = getFirebaseAdmin();
   const db = admin.firestore();
@@ -120,6 +157,25 @@ export async function createRates(docs: RateWriteDoc[]): Promise<number> {
     for (const doc of chunk) {
       const ref = coll.doc();
       batch.set(ref, doc);
+      written += 1;
+    }
+    await batch.commit();
+  }
+  return written;
+}
+
+export async function createRatesWithIds(
+  docs: RateWriteDocWithId[]
+): Promise<number> {
+  const admin = getFirebaseAdmin();
+  const db = admin.firestore();
+  const coll = db.collection(COLLECTION_RATE);
+  let written = 0;
+  for (let i = 0; i < docs.length; i += FIRESTORE_BATCH_SIZE) {
+    const chunk = docs.slice(i, i + FIRESTORE_BATCH_SIZE);
+    const batch = db.batch();
+    for (const { rateId, ...doc } of chunk) {
+      batch.set(coll.doc(rateId), doc);
       written += 1;
     }
     await batch.commit();

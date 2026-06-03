@@ -13,3 +13,7 @@ export type ListProductsPaginatedOptions = {
 export async function listProductsPaginated(options: ListProductsPaginatedOptions) {
   return productsRepo.listProductsPaginated(options);
 }
+
+export async function countProducts() {
+  return productsRepo.countProducts();
+}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AdminBadge } from "@/presentation/components/admin/AdminBadge";
@@ -17,6 +17,7 @@ import {
   AdminTableHeaderRow,
   AdminTableRow,
 } from "@/presentation/components/admin/AdminTable";
+import { useAuthenticatedFetch } from "@/presentation/auth/useAuthenticatedFetch";
 import type { ProductRow } from "@/domain/types/products";
 
 type SortKey = "productId" | "category" | "tags" | "isActive" | "updatedAt" | "";
@@ -25,6 +26,8 @@ const DEFAULT_PAGE_SIZE = 50;
 
 type AdminProductsContentProps = {
   initialProducts: ProductRow[];
+  initialNextCursor: string | null;
+  totalProducts: number;
   error?: string | null;
 };
 
@@ -65,40 +68,56 @@ function compareProducts(a: ProductRow, b: ProductRow, key: SortKey, dir: "asc" 
   return dir === "asc" ? cmp : -cmp;
 }
 
-function matchProduct(product: ProductRow, query: string): boolean {
-  if (!query.trim()) return true;
-  const lower = query.trim().toLowerCase();
-  const tags = Array.isArray(product.tags) ? product.tags.join(" ").toLowerCase() : "";
-  return (
-    (product.productId ?? "").toLowerCase().includes(lower) ||
-    (product.name ?? "").toLowerCase().includes(lower) ||
-    (product.category ?? "").toLowerCase().includes(lower) ||
-    tags.includes(lower)
-  );
+function buildProductsUrl(params: {
+  pageSize: number;
+  cursor?: string | null;
+  query?: string;
+}): string {
+  const searchParams = new URLSearchParams();
+  searchParams.set("limit", String(params.pageSize));
+  if (params.cursor) searchParams.set("cursor", params.cursor);
+  if (params.query?.trim()) searchParams.set("q", params.query.trim());
+  return `/api/admin/products?${searchParams.toString()}`;
 }
 
-export function AdminProductsContent({ initialProducts, error }: AdminProductsContentProps) {
+export function AdminProductsContent({
+  initialProducts,
+  initialNextCursor,
+  totalProducts,
+  error,
+}: AdminProductsContentProps) {
   const router = useRouter();
+  const authFetch = useAuthenticatedFetch();
   const [searchQuery, setSearchQuery] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [productsByPage, setProductsByPage] = useState<Record<number, ProductRow[]>>({
+    1: initialProducts,
+  });
+  const [nextCursorByPage, setNextCursorByPage] = useState<Record<number, string | null>>({
+    1: initialNextCursor,
+  });
+  const [loadingPage, setLoadingPage] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const isSearching = searchQuery.trim().length > 0;
 
-  const filteredProducts = useMemo(
-    () => initialProducts.filter((product) => matchProduct(product, searchQuery)),
-    [initialProducts, searchQuery]
-  );
+  const pageProducts = productsByPage[page] ?? [];
 
   const sortedFiltered = useMemo(() => {
-    if (!sortKey) return filteredProducts;
-    return [...filteredProducts].sort((a, b) => compareProducts(a, b, sortKey, sortDir));
-  }, [filteredProducts, sortKey, sortDir]);
+    if (!sortKey) return pageProducts;
+    return [...pageProducts].sort((a, b) => compareProducts(a, b, sortKey, sortDir));
+  }, [pageProducts, sortKey, sortDir]);
 
-  const paginatedProducts = useMemo(() => {
-    const start = (page - 1) * pageSize;
-    return sortedFiltered.slice(start, start + pageSize);
-  }, [sortedFiltered, page, pageSize]);
+  const hasMore = nextCursorByPage[page] != null;
+  const loadedCount = Object.values(productsByPage).reduce(
+    (count, products) => count + products.length,
+    0
+  );
+  const paginationTotal = isSearching
+    ? loadedCount + (hasMore ? pageSize : 0)
+    : totalProducts;
 
   const openProduct = useCallback(
     (productId: string) => {
@@ -106,6 +125,99 @@ export function AdminProductsContent({ initialProducts, error }: AdminProductsCo
     },
     [router]
   );
+
+  const fetchProductsPage = useCallback(
+    async (params: {
+      targetPage: number;
+      targetPageSize: number;
+      query: string;
+      cursor: string | null;
+    }) => {
+      setLoadError(null);
+      setLoadingPage(true);
+      try {
+        const res = await authFetch(
+          buildProductsUrl({
+            pageSize: params.targetPageSize,
+            cursor: params.cursor,
+            query: params.query,
+          })
+        );
+        const data = await res.json();
+        if (!res.ok || !Array.isArray(data)) {
+          const message = Array.isArray(data)
+            ? "Failed to load products"
+            : (data as { error?: string }).error ?? "Failed to load products";
+          throw new Error(message);
+        }
+        const nextCursor = res.headers.get("X-Next-Cursor");
+        setProductsByPage((current) =>
+          params.targetPage === 1
+            ? { 1: data }
+            : { ...current, [params.targetPage]: data }
+        );
+        setNextCursorByPage((current) =>
+          params.targetPage === 1
+            ? { 1: nextCursor }
+            : { ...current, [params.targetPage]: nextCursor }
+        );
+        setPage(params.targetPage);
+      } catch (err) {
+        setLoadError(err instanceof Error ? err.message : "Request failed");
+      } finally {
+        setLoadingPage(false);
+      }
+    },
+    [authFetch]
+  );
+
+  const loadPage = useCallback(
+    async (targetPage: number) => {
+      if (productsByPage[targetPage]) {
+        setPage(targetPage);
+        return;
+      }
+
+      const previousPage = targetPage - 1;
+      const cursor = nextCursorByPage[previousPage];
+      if (!cursor) return;
+
+      await fetchProductsPage({
+        targetPage,
+        targetPageSize: pageSize,
+        query: searchQuery,
+        cursor,
+      });
+    },
+    [fetchProductsPage, nextCursorByPage, pageSize, productsByPage, searchQuery]
+  );
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      if (!searchQuery.trim() && pageSize === DEFAULT_PAGE_SIZE) {
+        setProductsByPage({ 1: initialProducts });
+        setNextCursorByPage({ 1: initialNextCursor });
+        setPage(1);
+        setLoadError(null);
+        setLoadingPage(false);
+        return;
+      }
+
+      void fetchProductsPage({
+        targetPage: 1,
+        targetPageSize: pageSize,
+        query: searchQuery,
+        cursor: null,
+      });
+    }, 300);
+    return () => window.clearTimeout(timeout);
+  }, [
+    fetchProductsPage,
+    initialNextCursor,
+    initialProducts,
+    pageSize,
+    searchQuery,
+  ]);
 
   const toggleSort = useCallback((key: SortKey) => {
     if (!key) return;
@@ -151,13 +263,24 @@ export function AdminProductsContent({ initialProducts, error }: AdminProductsCo
               onChange={(event) => {
                 setSearchQuery(event.target.value);
                 setPage(1);
+                setProductsByPage({});
+                setNextCursorByPage({});
+                setLoadError(null);
+                setLoadingPage(true);
               }}
-              placeholder="Search by product ID, name, category, or tags..."
+              placeholder="Search by product ID prefix..."
             />
           </div>
-          {filteredProducts.length === 0 ? (
+          {loadError && (
+            <div className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              {loadError}
+            </div>
+          )}
+          {loadingPage && pageProducts.length === 0 ? (
+            <p className="py-8 text-center text-sm text-zinc-500">Loading...</p>
+          ) : sortedFiltered.length === 0 ? (
             <p className="py-8 text-center text-sm text-zinc-500">
-              {initialProducts.length === 0
+              {!isSearching && totalProducts === 0
                 ? "No products available."
                 : "No products match your search."}
             </p>
@@ -175,7 +298,7 @@ export function AdminProductsContent({ initialProducts, error }: AdminProductsCo
                   </AdminTableHeaderRow>
                 </thead>
                 <AdminTableBody>
-                  {paginatedProducts.map((product) => (
+                  {sortedFiltered.map((product) => (
                     <AdminTableRow
                       key={product.productId}
                       interactive
@@ -219,12 +342,20 @@ export function AdminProductsContent({ initialProducts, error }: AdminProductsCo
                 <AdminPagination
                   page={page}
                   pageSize={pageSize}
-                  total={sortedFiltered.length}
-                  onPageChange={(newPage) => setPage(newPage)}
+                  total={paginationTotal}
+                  hasMore={hasMore}
+                  totalIsEstimate={isSearching}
+                  onPageChange={(newPage) => {
+                    void loadPage(newPage);
+                  }}
                   pageSizeOptions={[10, 25, 50]}
                   onPageSizeChange={(size) => {
                     setPageSize(size);
                     setPage(1);
+                    setProductsByPage({});
+                    setNextCursorByPage({});
+                    setLoadError(null);
+                    setLoadingPage(true);
                   }}
                 />
               </div>

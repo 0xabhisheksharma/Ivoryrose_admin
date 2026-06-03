@@ -33,7 +33,9 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const { profile, logout, can } = useAuth();
-  const visibleNavigation = ADMIN_NAVIGATION.filter((item) => can(item.permission));
+  const visibleNavigation = ADMIN_NAVIGATION.filter(
+    (item) => !item.hiddenFromSidebar && can(item.permission)
+  );
   const activeNav = getActiveNavigation(pathname);
 
   return (

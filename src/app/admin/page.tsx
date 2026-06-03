@@ -7,7 +7,6 @@ import { useAuthenticatedFetch } from "@/presentation/auth/useAuthenticatedFetch
 
 type DashboardStats = {
   totalProducts: number;
-  totalTags: number;
   totalRates: number;
   goldRate: number | null;
   goldRateUpdatedAt: string | null;
@@ -77,11 +76,10 @@ export default function AdminPage() {
   return (
     <AdminCard
       title="Dashboard"
-      description="Overview of products, tags, rates, and gold rate."
+      description="Overview of products, rates, and gold rate."
     >
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-4">
         <AdminStatCard label="Total Products" value={s.totalProducts} />
-        <AdminStatCard label="Total Tags" value={s.totalTags} />
         <AdminStatCard label="Total Rate Records" value={s.totalRates} />
         <AdminStatCard
           label="Current Gold Rate"

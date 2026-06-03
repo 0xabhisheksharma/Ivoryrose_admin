@@ -1,9 +1,18 @@
 import { parseSpreadsheetId, parseDriveFolderId } from "@/shared/utils/drive";
+import { makeRateDocId } from "@/shared/utils/rate-key";
 import { listDriveFiles, findSpreadsheetInFiles, getSheetsClient } from "@/infrastructure/services/drive";
 import { encryptRsRate } from "@/infrastructure/services/encryption/rate-encryption";
 import * as ratesRepo from "@/infrastructure/repositories/rates.repository";
 import { RATE_SHEET_NAME } from "@/config";
 import type { RateSyncResult } from "@/domain/types";
+
+type MappedRateRow = {
+  sourceRowNumber: number;
+  TYP: string;
+  SHP: string;
+  Band: string;
+  Rs_Rate: number | null;
+};
 
 function parseRsRate(value: unknown): number | null {
   if (value === undefined || value === null || value === "") return null;
@@ -39,6 +48,90 @@ function mapRow(row: unknown[]): {
   return { TYP: typ, SHP: shp, Band: band, Rs_Rate: rsRate };
 }
 
+function analyzeDeterministicRateKeyCollisions(rows: MappedRateRow[]): void {
+  const rowsByKey = new Map<string, MappedRateRow[]>();
+  for (const row of rows) {
+    const key = makeRateDocId(row);
+    const existing = rowsByKey.get(key);
+    if (existing) existing.push(row);
+    else rowsByKey.set(key, [row]);
+  }
+
+  const duplicates = Array.from(rowsByKey.entries()).filter(
+    ([, duplicateRows]) => duplicateRows.length > 1
+  );
+  if (duplicates.length === 0) return;
+
+  const collisionReport = duplicates.map(([key, duplicateRows]) => {
+    const rateValues = new Set(
+      duplicateRows.map((row) =>
+        row.Rs_Rate === null ? "null" : String(row.Rs_Rate)
+      )
+    );
+    return {
+      key,
+      sourceRowNumbers: duplicateRows.map((row) => row.sourceRowNumber),
+      rows: duplicateRows.map((row) => ({
+        sourceRowNumber: row.sourceRowNumber,
+        TYP: row.TYP,
+        SHP: row.SHP,
+        Band: row.Band,
+        Rs_Rate: row.Rs_Rate,
+      })),
+      hasDifferentRsRateValues: rateValues.size > 1,
+    };
+  });
+
+  const conflicting = collisionReport.filter(
+    (item) => item.hasDifferentRsRateValues
+  );
+  if (conflicting.length > 0) {
+    console.error("[sync-rate] Deterministic Rate ID conflicts detected", {
+      conflicts: conflicting,
+    });
+    throw new Error(
+      `Rate sync aborted before deleting existing rates: ${conflicting.length} duplicate deterministic Rate key(s) have different Rs_Rate values.`
+    );
+  }
+
+  console.warn("[sync-rate] Duplicate deterministic Rate keys detected", {
+    duplicates: collisionReport,
+  });
+}
+
+function buildDeterministicRateWrites(rows: MappedRateRow[]): {
+  rateId: string;
+  TYP: string;
+  SHP: string;
+  Band: string;
+  Rs_Rate: string | null;
+}[] {
+  const writesByRateId = new Map<
+    string,
+    {
+      rateId: string;
+      TYP: string;
+      SHP: string;
+      Band: string;
+      Rs_Rate: string | null;
+    }
+  >();
+
+  for (const row of rows) {
+    const rateId = makeRateDocId(row);
+    if (writesByRateId.has(rateId)) continue;
+    writesByRateId.set(rateId, {
+      rateId,
+      TYP: row.TYP,
+      SHP: row.SHP,
+      Band: row.Band,
+      Rs_Rate: encryptRsRate(row.Rs_Rate),
+    });
+  }
+
+  return Array.from(writesByRateId.values());
+}
+
 export async function syncRatesFromSheet(
   driveLink: string
 ): Promise<RateSyncResult> {
@@ -64,9 +157,10 @@ export async function syncRatesFromSheet(
     range,
   });
   const rawRows = (res.data.values || []) as unknown[][];
-  const mapped: { TYP: string; SHP: string; Band: string; Rs_Rate: number | null }[] = [];
+  const mapped: MappedRateRow[] = [];
   let skipped = 0;
-  for (const row of rawRows) {
+  for (let index = 0; index < rawRows.length; index += 1) {
+    const row = rawRows[index];
     if (isEmptyRow(row)) {
       skipped += 1;
       continue;
@@ -76,16 +170,12 @@ export async function syncRatesFromSheet(
       skipped += 1;
       continue;
     }
-    mapped.push(doc);
+    mapped.push({ ...doc, sourceRowNumber: index + 2 });
   }
+  analyzeDeterministicRateKeyCollisions(mapped);
   const deleted = await ratesRepo.deleteAllRates();
-  const toWrite = mapped.map((doc) => ({
-    TYP: doc.TYP,
-    SHP: doc.SHP,
-    Band: doc.Band,
-    Rs_Rate: encryptRsRate(doc.Rs_Rate),
-  }));
-  const written = await ratesRepo.createRates(toWrite);
+  const toWrite = buildDeterministicRateWrites(mapped);
+  const written = await ratesRepo.createRatesWithIds(toWrite);
   return {
     deleted,
     written,

@@ -13,3 +13,25 @@ export async function listRates(): Promise<RateRow[]> {
     updatedAt: d.updatedAt,
   }));
 }
+
+export async function listRatesPaginated(options?: {
+  limit?: number;
+  cursor?: string | null;
+}): Promise<{ items: RateRow[]; nextCursor: string | null }> {
+  const result = await ratesRepo.listRatesPaginated(options);
+  return {
+    items: result.items.map((d) => ({
+      rateId: d.rateId,
+      TYP: d.TYP,
+      SHP: d.SHP,
+      Band: d.Band,
+      Rs_Rate: decryptRsRate(d.Rs_Rate),
+      updatedAt: d.updatedAt,
+    })),
+    nextCursor: result.nextCursor,
+  };
+}
+
+export async function countRates(): Promise<number> {
+  return ratesRepo.countRates();
+}

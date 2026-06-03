@@ -3,20 +3,64 @@ import { COLLECTION_TAGS } from "@/shared/constants/firestore";
 import { serializeTimestamp } from "@/shared/utils/serialize-timestamp";
 import type { TagRow } from "@/domain/types";
 
+const DEFAULT_PAGE_SIZE = 50;
+const MAX_PAGE_SIZE = 200;
+
+export type ListTagsPaginatedResult = {
+  items: TagRow[];
+  nextCursor: string | null;
+};
+
+function docToTagRow(
+  d: FirebaseFirestore.DocumentSnapshot<FirebaseFirestore.DocumentData>
+): TagRow {
+  const data = d.data() ?? {};
+  return {
+    tagId: d.id,
+    name: data.name ?? "",
+    type: data.type ?? "",
+    updatedAt: serializeTimestamp(data.updatedAt),
+  };
+}
+
 export async function listTags(): Promise<TagRow[]> {
+  // Intentional full-list read: tags are a small, admin-managed taxonomy and
+  // the current tags UI edits/searches the complete set without changing the
+  // /api/admin/tags array response contract.
   const admin = getFirebaseAdmin();
   const db = admin.firestore();
   const snapshot = await db.collection(COLLECTION_TAGS).get();
-  return snapshot.docs.map((d) => {
-    const data = d.data();
-    const updatedAt = data.updatedAt;
-    return {
-      tagId: d.id,
-      name: data.name ?? "",
-      type: data.type ?? "",
-      updatedAt: serializeTimestamp(updatedAt),
-    };
-  });
+  return snapshot.docs.map((d) => docToTagRow(d));
+}
+
+export async function listTagsPaginated(options: {
+  limit?: number;
+  cursor?: string | null;
+} = {}): Promise<ListTagsPaginatedResult> {
+  const admin = getFirebaseAdmin();
+  const db = admin.firestore();
+  const limit = Math.min(
+    Math.max(1, options.limit ?? DEFAULT_PAGE_SIZE),
+    MAX_PAGE_SIZE
+  );
+
+  let query: FirebaseFirestore.Query<FirebaseFirestore.DocumentData> = db
+    .collection(COLLECTION_TAGS)
+    .orderBy(admin.firestore.FieldPath.documentId())
+    .limit(limit + 1);
+
+  if (options.cursor?.trim()) {
+    query = query.startAfter(options.cursor.trim());
+  }
+
+  const snapshot = await query.get();
+  const docs = snapshot.docs.slice(0, limit);
+  const hasMore = snapshot.docs.length > limit;
+
+  return {
+    items: docs.map((d) => docToTagRow(d)),
+    nextCursor: hasMore && docs.length > 0 ? docs[docs.length - 1].id : null,
+  };
 }
 
 export async function countTags(): Promise<number> {

@@ -103,10 +103,10 @@ export async function listProductsPaginated(
     db.collection(COLLECTION_PRODUCTS);
 
   if (search) {
-    // Search mode: prefix search on productId; cursor is tied to query.
+    // Search mode: product documents use productId as the document id, so
+    // querying __name__ directly avoids a productId + __name__ composite index.
     query = query
-      .orderBy("productId")
-      .orderBy(admin.firestore.FieldPath.documentId(), "desc")
+      .orderBy(admin.firestore.FieldPath.documentId())
       .startAt(search)
       .endAt(`${search}\uf8ff`)
       .limit(limit + 1);
@@ -114,7 +114,7 @@ export async function listProductsPaginated(
     if (options.cursor?.trim()) {
       const decoded = decodeCursor(options.cursor.trim());
       if (decoded && (decoded.query ?? "") === search) {
-        query = query.startAfter(decoded.productId, decoded.productId);
+        query = query.startAfter(decoded.productId);
       }
     }
   } else {

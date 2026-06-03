@@ -6,6 +6,8 @@ type AdminPaginationProps = {
   page: number;
   pageSize: number;
   total: number;
+  hasMore?: boolean;
+  totalIsEstimate?: boolean;
   onPageChange: (page: number) => void;
   pageSizeOptions?: number[];
   onPageSizeChange?: (size: number) => void;
@@ -19,15 +21,18 @@ export function AdminPagination({
   page,
   pageSize,
   total,
+  hasMore = false,
+  totalIsEstimate = false,
   onPageChange,
   pageSizeOptions = [10, 25, 50],
   onPageSizeChange,
 }: AdminPaginationProps) {
   const pageCount = total > 0 ? Math.ceil(total / pageSize) : 1;
   const canPrev = page > 1;
-  const canNext = page < pageCount;
+  const canNext = page < pageCount || hasMore;
   const start = total === 0 ? 0 : (page - 1) * pageSize + 1;
   const end = Math.min(page * pageSize, total);
+  const totalLabel = totalIsEstimate && hasMore ? `${total}+` : String(total);
 
   return (
     <div className="flex flex-col gap-3 border-t border-zinc-200 bg-zinc-50/80 px-4 py-3 text-xs text-zinc-500 sm:flex-row sm:items-center sm:justify-between">
@@ -37,7 +42,7 @@ export function AdminPagination({
           <span className="font-medium text-zinc-900">
             {start}-{end}
           </span>{" "}
-          of <span className="font-medium text-zinc-900">{total}</span>
+          of <span className="font-medium text-zinc-900">{totalLabel}</span>
         </span>
       </div>
       <div className="flex items-center gap-3">
@@ -66,7 +71,7 @@ export function AdminPagination({
           <span className="px-1 text-[11px] text-zinc-500">
             Page{" "}
             <span className="font-semibold text-zinc-900">
-              {page} / {pageCount}
+              {page} / {hasMore && page >= pageCount ? `${pageCount}+` : pageCount}
             </span>
           </span>
           <AdminButton

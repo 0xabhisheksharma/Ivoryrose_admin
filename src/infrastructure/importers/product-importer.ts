@@ -369,6 +369,116 @@ function pickDetailWorksheet(workbook: ExcelJS.Workbook): ExcelJS.Worksheet {
   return workbook.worksheets[0];
 }
 
+function normalizeWorksheetName(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function compactWorksheetName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function pickReturnedUnusedGoodsWorksheet(workbook: ExcelJS.Workbook): ExcelJS.Worksheet | null {
+  const targetNames = new Set([
+    "returned/unused goods",
+    "returned unused goods",
+    "returned-unused goods",
+    "returnedunused goods",
+    "returnedunusedgoods",
+  ]);
+  const targetCompactName = "returnedunusedgoods";
+  return (
+    workbook.worksheets.find((ws) =>
+      targetNames.has(normalizeWorksheetName(ws.name || "")) ||
+      compactWorksheetName(ws.name || "") === targetCompactName
+    ) ?? null
+  );
+}
+
+function normalizeCellValue(cellValue: ExcelJS.CellValue): string | number {
+  const resolved =
+    cellValue == null
+      ? ""
+      : typeof cellValue === "object" && "result" in cellValue
+        ? ((cellValue as { result?: unknown }).result ?? "")
+        : cellValue;
+  if (typeof resolved === "number") return resolved;
+  if (resolved == null || resolved === "") return "";
+  const asString = String(resolved).trim();
+  const numericValue = Number(asString);
+  return !Number.isNaN(numericValue) && asString !== "" ? numericValue : asString;
+}
+
+function parseStoneRowsFromWorksheet(worksheet: ExcelJS.Worksheet): StoneRow[] {
+  const rows: StoneRow[] = [];
+  worksheet.eachRow((row, rowNumber) => {
+    if (rowNumber < 2) return;
+    const rowData: (string | number)[] = [];
+    for (let colNum = 2; colNum <= 12; colNum++) {
+      rowData.push(normalizeCellValue(row.getCell(colNum).value));
+    }
+    if (!isBlankRow(rowData)) {
+      const [typ, shp, qly, lot, band, mmSize, avWt, qty, twt, location, remarks] = rowData;
+      const avWtNum = typeof avWt === "number" ? avWt : (avWt ? parseFloat(String(avWt).replace(/,/g, "")) : 0) || 0;
+      const qtyNum = typeof qty === "number" ? qty : (qty ? parseFloat(String(qty).replace(/,/g, "")) : 0) || 0;
+      const twtNum = typeof twt === "number" ? twt : (twt ? parseFloat(String(twt).replace(/,/g, "")) : 0) || 0;
+      rows.push({
+        typ: String(typ ?? "").trim(),
+        shp: String(shp ?? "").trim(),
+        qly: String(qly ?? "").trim(),
+        lot: String(lot ?? "").trim(),
+        band: String(band ?? "").trim(),
+        mmSize: String(mmSize ?? "").trim(),
+        avWt: Number.isNaN(avWtNum) ? 0 : avWtNum,
+        qty: Number.isNaN(qtyNum) ? 0 : qtyNum,
+        twt: Number.isNaN(twtNum) ? 0 : twtNum,
+        location: String(location ?? "").trim(),
+        remarks: String(remarks ?? "").trim(),
+      });
+    }
+  });
+  return rows;
+}
+
+type ReturnedUnusedGoodsRow = StoneRow | Record<string, string | number>;
+
+function normalizeHeaderName(value: string | number, fallback: string): string {
+  const header = String(value ?? "").trim();
+  if (!header) return fallback;
+  return header
+    .replace(/\s+/g, " ")
+    .replace(/[./()[\]{}#]+/g, " ")
+    .trim()
+    .replace(/\s+([a-zA-Z0-9])/g, (_, char: string) => char.toUpperCase())
+    .replace(/^[A-Z]/, (char) => char.toLowerCase()) || fallback;
+}
+
+function isReturnedUnusedGenericRowBlank(row: Record<string, string | number>): boolean {
+  return Object.values(row).every((value) => String(value ?? "").trim() === "");
+}
+
+function parseReturnedUnusedGoodsRows(worksheet: ExcelJS.Worksheet): ReturnedUnusedGoodsRow[] {
+  const detailShapeRows = parseStoneRowsFromWorksheet(worksheet);
+  if (detailShapeRows.length > 0) return detailShapeRows;
+
+  const headerRow = worksheet.getRow(1);
+  const headers: string[] = [];
+  const columnCount = Math.max(headerRow.cellCount, worksheet.actualColumnCount);
+  for (let colNum = 1; colNum <= columnCount; colNum++) {
+    headers.push(normalizeHeaderName(normalizeCellValue(headerRow.getCell(colNum).value), `column${colNum}`));
+  }
+
+  const rows: ReturnedUnusedGoodsRow[] = [];
+  worksheet.eachRow((row, rowNumber) => {
+    if (rowNumber < 2) return;
+    const rowData: Record<string, string | number> = {};
+    for (let colNum = 1; colNum <= columnCount; colNum++) {
+      rowData[headers[colNum - 1] || `column${colNum}`] = normalizeCellValue(row.getCell(colNum).value);
+    }
+    if (!isReturnedUnusedGenericRowBlank(rowData)) rows.push(rowData);
+  });
+  return rows;
+}
+
 async function readExcelFile(filePath: string): Promise<{ rows: StoneRow[]; assumingNetWt: number | string | null }> {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.readFile(filePath);
@@ -394,47 +504,35 @@ async function readExcelFile(filePath: string): Promise<{ rows: StoneRow[]; assu
     // ignore
   }
 
-  const rows: StoneRow[] = [];
-  worksheet.eachRow((row, rowNumber) => {
-    if (rowNumber < 2) return;
-    const rowData: (string | number)[] = [];
-    for (let colNum = 2; colNum <= 12; colNum++) {
-      const cell = row.getCell(colNum);
-      const cellValue = cell.value;
-      const resolved: string | number =
-        cellValue == null
-          ? ""
-          : typeof cellValue === "object" && "result" in cellValue
-            ? String((cellValue as { result?: unknown }).result ?? "")
-            : (cellValue as string | number);
-      if (typeof resolved === "number") rowData.push(resolved);
-      else if (resolved === "" || resolved == null) rowData.push("");
-      else {
-        const n = Number(resolved);
-        rowData.push(!Number.isNaN(n) && String(resolved).trim() !== "" ? n : String(resolved).trim());
-      }
-    }
-    if (!isBlankRow(rowData)) {
-      const [typ, shp, qly, lot, band, mmSize, avWt, qty, twt, location, remarks] = rowData;
-      const avWtNum = typeof avWt === "number" ? avWt : (avWt ? parseFloat(String(avWt).replace(/,/g, "")) : 0) || 0;
-      const qtyNum = typeof qty === "number" ? qty : (qty ? parseFloat(String(qty).replace(/,/g, "")) : 0) || 0;
-      const twtNum = typeof twt === "number" ? twt : (twt ? parseFloat(String(twt).replace(/,/g, "")) : 0) || 0;
-      rows.push({
-        typ: String(typ ?? "").trim(),
-        shp: String(shp ?? "").trim(),
-        qly: String(qly ?? "").trim(),
-        lot: String(lot ?? "").trim(),
-        band: String(band ?? "").trim(),
-        mmSize: String(mmSize ?? "").trim(),
-        avWt: Number.isNaN(avWtNum) ? 0 : avWtNum,
-        qty: Number.isNaN(qtyNum) ? 0 : qtyNum,
-        twt: Number.isNaN(twtNum) ? 0 : twtNum,
-        location: String(location ?? "").trim(),
-        remarks: String(remarks ?? "").trim(),
-      });
-    }
-  });
-  return { rows, assumingNetWt };
+  return { rows: parseStoneRowsFromWorksheet(worksheet), assumingNetWt };
+}
+
+type ReturnedUnusedGoodsData = {
+  rows: ReturnedUnusedGoodsRow[];
+  sourceSheetName: string | null;
+  sheetFound: boolean;
+  availableSheetNames: string[];
+};
+
+async function readReturnedUnusedGoodsFile(filePath: string): Promise<ReturnedUnusedGoodsData> {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(filePath);
+  const availableSheetNames = workbook.worksheets.map((ws) => ws.name);
+  const worksheet = pickReturnedUnusedGoodsWorksheet(workbook);
+  if (!worksheet) {
+    return {
+      rows: [],
+      sourceSheetName: null,
+      sheetFound: false,
+      availableSheetNames,
+    };
+  }
+  return {
+    rows: parseReturnedUnusedGoodsRows(worksheet),
+    sourceSheetName: worksheet.name,
+    sheetFound: true,
+    availableSheetNames,
+  };
 }
 
 // -------------------------
@@ -659,6 +757,76 @@ function readHtmlTableRows(html: string): string[][] {
     if (cells.some(Boolean)) rows.push(cells);
   }
   return rows;
+}
+
+function compactHtmlLabel(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function normalizeClientCode(value: string | null | undefined): string | null {
+  const normalized = String(value ?? "")
+    .replace(/\s+/g, " ")
+    .replace(/^[\s:.-]+|[\s:.-]+$/g, "")
+    .trim();
+  if (!normalized) return null;
+  return normalized;
+}
+
+function findClientCodeFromFileName(filePath: string): string | null {
+  const baseName = path.parse(path.basename(filePath)).name;
+  if (!baseName) return null;
+  const parts = baseName
+    .split(/\s*-\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length < 2) return null;
+  const candidate = parts[parts.length - 1].replace(/\s*\(\d+\)\s*$/g, "").trim();
+  return normalizeClientCode(candidate);
+}
+
+function findClientCodeFromHtml(html: string): string | null {
+  const rows = readHtmlTableRows(html);
+  for (const row of rows) {
+    for (let index = 0; index < row.length; index++) {
+      const cell = row[index] ?? "";
+      const compact = compactHtmlLabel(cell);
+      if (compact === "clientcode" || compact === "clientcodeno" || compact === "client") {
+        const nextValue = normalizeClientCode(row[index + 1]);
+        if (nextValue) return nextValue;
+      }
+      const inlineMatch = cell.match(/client\s*(?:code|codeno|no)?\s*[:.-]\s*(.+)$/i);
+      const inlineValue = normalizeClientCode(inlineMatch?.[1]);
+      if (inlineValue) return inlineValue;
+    }
+  }
+
+  const text = stripHtml(html);
+  const inlineMatch = text.match(/client\s*(?:code|codeno|no)?\s*[:.-]\s*([A-Za-z0-9_-]+)/i);
+  return normalizeClientCode(inlineMatch?.[1]);
+}
+
+function currentQuoteDateStamp(): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const year = parts.find((part) => part.type === "year")?.value ?? "00";
+  const month = parts.find((part) => part.type === "month")?.value ?? "00";
+  const day = parts.find((part) => part.type === "day")?.value ?? "00";
+  const yearTwoDigits = year.slice(-2);
+  return `${day}-${month}-${yearTwoDigits}`;
+}
+
+function buildQuoteFileNames(productId: string, clientCode: string | null): string[] {
+  const safeProductId = sanitizeFileName(productId);
+  const safeClientCode = sanitizeFileName(clientCode || "Client");
+  const dateStamp = currentQuoteDateStamp();
+  return [
+    `Quo-${safeProductId}-${safeClientCode}-${dateStamp}.xlsx`,
+    `${safeProductId}-${safeClientCode}-${dateStamp}.xlsx`,
+  ];
 }
 
 function readMetaItempropTagsFromHtml(html: string): string[] {
@@ -1069,7 +1237,7 @@ async function uploadLocalFileToDriveFolder(
   filePath: string,
   fileName: string,
   mimeType: string
-): Promise<void> {
+): Promise<string> {
   const existingId = await findDriveFileByName(drive, parentFolderId, fileName);
   const media = { mimeType, body: fs.createReadStream(filePath) };
   if (existingId) {
@@ -1078,9 +1246,9 @@ async function uploadLocalFileToDriveFolder(
       media,
       supportsAllDrives: true,
     });
-    return;
+    return existingId;
   }
-  await drive.files.create({
+  const res = await drive.files.create({
     requestBody: {
       name: fileName,
       parents: [parentFolderId],
@@ -1090,6 +1258,9 @@ async function uploadLocalFileToDriveFolder(
     fields: "id",
     supportsAllDrives: true,
   });
+  const id = res.data.id;
+  if (!id) throw new Error(`Could not upload Drive file: ${fileName}`);
+  return id;
 }
 
 async function uploadBufferToDriveFolder(
@@ -1125,7 +1296,7 @@ async function archiveQuoteToDrive(
   destinationFolderId: string,
   productId: string,
   quoteBuffer: Buffer,
-  fileName: string
+  fileNames: string[]
 ): Promise<void> {
   const productFolderId = await ensureDriveFolder(
     drive,
@@ -1137,13 +1308,164 @@ async function archiveQuoteToDrive(
     productFolderId,
     "Quotations"
   );
-  await uploadBufferToDriveFolder(
-    drive,
-    quotesFolderId,
-    quoteBuffer,
-    sanitizeFileName(fileName),
-    XLSX_MIME
+  for (const fileName of fileNames) {
+    await uploadBufferToDriveFolder(
+      drive,
+      quotesFolderId,
+      quoteBuffer,
+      sanitizeFileName(fileName),
+      XLSX_MIME
+    );
+  }
+}
+
+function normalizeMatchValue(value: unknown): string {
+  return String(value ?? "").trim().toUpperCase();
+}
+
+function numericCellValue(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const parsed = Number(String(value ?? "").replace(/,/g, "").trim());
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getReturnedUnusedGoodsRowValue(
+  row: ReturnedUnusedGoodsRow,
+  aliases: string[]
+): string | number | undefined {
+  const rowRecord = row as Record<string, string | number | undefined>;
+  const compactAliases = aliases.map(compactWorksheetName);
+  for (const [key, value] of Object.entries(rowRecord)) {
+    if (compactAliases.includes(compactWorksheetName(key))) return value;
+  }
+  return undefined;
+}
+
+function returnedUnusedGoodsMatchKey(row: ReturnedUnusedGoodsRow): string | null {
+  const typ = getReturnedUnusedGoodsRowValue(row, ["typ", "type"]);
+  const shp = getReturnedUnusedGoodsRowValue(row, ["shp", "shape"]);
+  const band = getReturnedUnusedGoodsRowValue(row, ["band"]);
+  if (normalizeMatchValue(typ) === "" || normalizeMatchValue(shp) === "") return null;
+  return [
+    normalizeMatchValue(typ),
+    normalizeMatchValue(shp),
+    normalizeMatchValue(band),
+  ].join("|");
+}
+
+function buildReturnedUnusedGoodsMatchMap(
+  rows: ReturnedUnusedGoodsRow[]
+): Map<string, { qty: number; twt: number }> {
+  const matchMap = new Map<string, { qty: number; twt: number }>();
+  for (const row of rows) {
+    const key = returnedUnusedGoodsMatchKey(row);
+    if (!key) continue;
+    const qty = numericCellValue(getReturnedUnusedGoodsRowValue(row, ["qty", "quantity"])) ?? 0;
+    const twt = numericCellValue(getReturnedUnusedGoodsRowValue(row, ["twt", "total wt", "total weight"])) ?? 0;
+    const existing = matchMap.get(key);
+    if (existing) {
+      existing.qty += qty;
+      existing.twt += twt;
+    } else {
+      matchMap.set(key, { qty, twt });
+    }
+  }
+  return matchMap;
+}
+
+function quoteHeaderAlias(header: unknown): "typ" | "shp" | "band" | null {
+  const normalized = compactWorksheetName(String(header ?? ""));
+  if (normalized === "typ" || normalized === "type") return "typ";
+  if (normalized === "shp" || normalized === "shape") return "shp";
+  if (normalized === "band") return "band";
+  return null;
+}
+
+function findQuoteMatchColumns(
+  worksheet: ExcelJS.Worksheet
+): { headerRowNumber: number; typColumn: number; shpColumn: number; bandColumn: number } | null {
+  const maxRowsToScan = Math.min(30, worksheet.actualRowCount || 30);
+  const maxColumnsToScan = Math.max(worksheet.actualColumnCount, 20);
+  for (let rowNumber = 1; rowNumber <= maxRowsToScan; rowNumber++) {
+    const row = worksheet.getRow(rowNumber);
+    const columns: Partial<Record<"typ" | "shp" | "band", number>> = {};
+    for (let colNumber = 1; colNumber <= maxColumnsToScan; colNumber++) {
+      const alias = quoteHeaderAlias(normalizeCellValue(row.getCell(colNumber).value));
+      if (alias && !columns[alias]) columns[alias] = colNumber;
+    }
+    if (columns.typ && columns.shp && columns.band) {
+      return {
+        headerRowNumber: rowNumber,
+        typColumn: columns.typ,
+        shpColumn: columns.shp,
+        bandColumn: columns.band,
+      };
+    }
+  }
+  return null;
+}
+
+async function applyReturnedUnusedGoodsToQuoteBuffer(
+  quoteBuffer: Buffer,
+  returnedUnusedGoodsRows: ReturnedUnusedGoodsRow[]
+): Promise<Buffer> {
+  const matchMap = buildReturnedUnusedGoodsMatchMap(returnedUnusedGoodsRows);
+  if (matchMap.size === 0) return quoteBuffer;
+
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(
+    quoteBuffer as unknown as Parameters<ExcelJS.Workbook["xlsx"]["load"]>[0]
   );
+
+  let matchedRows = 0;
+  for (const worksheet of workbook.worksheets) {
+    const matchColumns = findQuoteMatchColumns(worksheet);
+    if (!matchColumns) continue;
+
+    worksheet.eachRow((row, rowNumber) => {
+      if (rowNumber <= matchColumns.headerRowNumber) return;
+      const key = [
+        normalizeMatchValue(normalizeCellValue(row.getCell(matchColumns.typColumn).value)),
+        normalizeMatchValue(normalizeCellValue(row.getCell(matchColumns.shpColumn).value)),
+        normalizeMatchValue(normalizeCellValue(row.getCell(matchColumns.bandColumn).value)),
+      ].join("|");
+      const returnedValues = matchMap.get(key);
+      if (!returnedValues) return;
+      row.getCell(19).value = returnedValues.qty;
+      row.getCell(20).value = returnedValues.twt;
+      row.commit();
+      matchedRows++;
+    });
+  }
+
+  if (matchedRows === 0) return quoteBuffer;
+  const updated = await workbook.xlsx.writeBuffer();
+  return Buffer.from(updated);
+}
+
+async function applyClientCodeToQuoteBuffer(
+  quoteBuffer: Buffer,
+  clientCode: string | null
+): Promise<Buffer> {
+  const normalizedClientCode = normalizeClientCode(clientCode);
+  if (!normalizedClientCode) return quoteBuffer;
+
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(
+    quoteBuffer as unknown as Parameters<ExcelJS.Workbook["xlsx"]["load"]>[0]
+  );
+
+  const sheet = workbook.getWorksheet("Summ") ?? workbook.worksheets[0];
+  if (!sheet) return quoteBuffer;
+
+  // A10:A11 is a merged cell; only the merge master (A10) holds the value.
+  const cell = sheet.getCell("A10");
+  const target = cell.isMerged && cell.master ? cell.master : cell;
+  target.value = normalizedClientCode;
+
+  workbook.calcProperties.fullCalcOnLoad = true;
+  const updated = await workbook.xlsx.writeBuffer();
+  return Buffer.from(updated);
 }
 
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -1398,9 +1720,15 @@ async function processProduct(
   productId: string,
   imagePaths: { path: string; name: string }[],
   options: ProcessProductOptions = {}
-): Promise<{ status: ImportProductResult; productId: string; error?: string }> {
+): Promise<{
+  status: ImportProductResult;
+  productId: string;
+  error?: string;
+  returnedUnusedGoodsRows?: ReturnedUnusedGoodsRow[];
+}> {
   const processingErrors: string[] = [];
   let rows: StoneRow[] = [];
+  let returnedUnusedGoodsData: ReturnedUnusedGoodsData | null = null;
   let assumingNetWt: number | string | null = null;
   let parsedStyle: ParsedStyle | null = null;
   let category = "Others";
@@ -1414,6 +1742,11 @@ async function processProduct(
       assumingNetWt = excelData.assumingNetWt ?? null;
     } catch (err) {
       processingErrors.push(`Excel read: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    try {
+      returnedUnusedGoodsData = await readReturnedUnusedGoodsFile(excelPath);
+    } catch (err) {
+      processingErrors.push(`Returned/Unused Goods read: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -1454,15 +1787,33 @@ async function processProduct(
 
   const productRef = db.collection("products").doc(productId);
   const rowsRef = db.collection("products").doc(productId).collection("rows").doc(productId);
+  const returnedUnusedGoodsRef = db
+    .collection("products")
+    .doc(productId)
+    .collection("returnedUnusedGoods")
+    .doc(productId);
   let existingDoc: admin.firestore.DocumentSnapshot | null = null;
   let existingData: Record<string, unknown> | null = null;
   let existingRows: StoneRow[] = [];
+  let existingReturnedUnusedGoodsRows: StoneRow[] = [];
+  let existingReturnedUnusedGoodsSheetName: string | null = null;
   try {
     existingDoc = await productRef.get();
     if (existingDoc.exists) existingData = existingDoc.data() as Record<string, unknown>;
     const rowsDoc = await rowsRef.get();
     const rowsData = rowsDoc.exists ? rowsDoc.data() : null;
     existingRows = Array.isArray(rowsData?.rows) ? (rowsData.rows as StoneRow[]) : [];
+    const returnedUnusedGoodsDoc = await returnedUnusedGoodsRef.get();
+    const returnedUnusedGoodsDocData = returnedUnusedGoodsDoc.exists
+      ? returnedUnusedGoodsDoc.data()
+      : null;
+    existingReturnedUnusedGoodsRows = Array.isArray(returnedUnusedGoodsDocData?.rows)
+      ? (returnedUnusedGoodsDocData.rows as StoneRow[])
+      : [];
+    existingReturnedUnusedGoodsSheetName =
+      typeof returnedUnusedGoodsDocData?.sourceSheetName === "string"
+        ? returnedUnusedGoodsDocData.sourceSheetName
+        : null;
   } catch (err) {
     processingErrors.push(`Read existing: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -1470,10 +1821,9 @@ async function processProduct(
   const matchingImages = options.includeAllImages
     ? imagePaths
     : imagePaths.filter((img) => {
-        const extracted = extractProductId(img.name);
-        return extracted.toUpperCase() === productId.toUpperCase();
+        return imageMatchesProductId(img.name, productId);
       });
-  matchingImages.sort((a, b) => a.name.localeCompare(b.name));
+  sortProductImagesForImport(matchingImages, productId);
 
   const expectedImageUrls = matchingImages.map((img) =>
     expectedImageUrl(bucket, category, productId, img.name)
@@ -1537,6 +1887,14 @@ async function processProduct(
     stoneSummary: aggregatedSummary || [],
     assumingNetWt: assumingNetWt ?? null,
   };
+  if (returnedUnusedGoodsData) {
+    productData.returnedUnusedGoodsImport = {
+      sheetFound: returnedUnusedGoodsData.sheetFound,
+      sourceSheetName: returnedUnusedGoodsData.sourceSheetName,
+      rowCount: returnedUnusedGoodsData.rows.length,
+      availableSheetNames: returnedUnusedGoodsData.availableSheetNames,
+    };
+  }
   if (!existingDoc?.exists || matchingImages.length > 0) {
     productData.imageUrls = imageUrls || [];
     productData.thumbnailUrl = thumbnailUrl || "";
@@ -1560,17 +1918,45 @@ async function processProduct(
         processingErrors.push(`Save rows: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    return { status: "CREATE", productId };
+    if (returnedUnusedGoodsData?.sheetFound) {
+      try {
+        await returnedUnusedGoodsRef.set({
+          rows: returnedUnusedGoodsData.rows,
+          sourceSheetName: returnedUnusedGoodsData.sourceSheetName,
+          availableSheetNames: returnedUnusedGoodsData.availableSheetNames,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      } catch (err) {
+        processingErrors.push(`Save Returned/Unused Goods: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return {
+      status: "CREATE",
+      productId,
+      returnedUnusedGoodsRows: returnedUnusedGoodsData?.sheetFound
+        ? returnedUnusedGoodsData.rows
+        : undefined,
+    };
   }
 
   const payloadUnchanged = compareProductData(productData, existingData ?? {});
   const rowsUnchanged =
     stoneSummary.length === 0 || valuesAreEqual(stoneSummary, existingRows);
-  if (payloadUnchanged && rowsUnchanged) {
+  const returnedUnusedGoodsUnchanged =
+    !returnedUnusedGoodsData?.sheetFound ||
+    (valuesAreEqual(returnedUnusedGoodsData.rows, existingReturnedUnusedGoodsRows) &&
+      valuesAreEqual(returnedUnusedGoodsData.sourceSheetName, existingReturnedUnusedGoodsSheetName));
+  if (payloadUnchanged && rowsUnchanged && returnedUnusedGoodsUnchanged) {
     console.log("[import-products] product unchanged; skipped Firestore product write", {
       productId,
     });
-    return { status: "SKIP", productId };
+    return {
+      status: "SKIP",
+      productId,
+      returnedUnusedGoodsRows: returnedUnusedGoodsData?.sheetFound
+        ? returnedUnusedGoodsData.rows
+        : undefined,
+    };
   }
 
   if (!rowsUnchanged && stoneSummary.length > 0) {
@@ -1584,11 +1970,24 @@ async function processProduct(
     }
   }
 
+  if (!returnedUnusedGoodsUnchanged && returnedUnusedGoodsData?.sheetFound) {
+    try {
+      await returnedUnusedGoodsRef.set({
+        rows: returnedUnusedGoodsData.rows,
+        sourceSheetName: returnedUnusedGoodsData.sourceSheetName,
+        availableSheetNames: returnedUnusedGoodsData.availableSheetNames,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    } catch (err) {
+      processingErrors.push(`Save Returned/Unused Goods: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   const changedFields = changedProductFields(productData, existingData ?? {});
   if (processingErrors.length > 0) {
     changedFields.processingErrors = processingErrors;
   }
-  if (Object.keys(changedFields).length > 0 || !rowsUnchanged) {
+  if (Object.keys(changedFields).length > 0 || !rowsUnchanged || !returnedUnusedGoodsUnchanged) {
     await productRef.set(
       {
         ...changedFields,
@@ -1597,7 +1996,13 @@ async function processProduct(
       { merge: true }
     );
   }
-  return { status: "UPDATE", productId };
+  return {
+    status: "UPDATE",
+    productId,
+    returnedUnusedGoodsRows: returnedUnusedGoodsData?.sheetFound
+      ? returnedUnusedGoodsData.rows
+      : undefined,
+  };
 }
 
 // -------------------------
@@ -1659,17 +2064,20 @@ function readLocalProductHtml(filePath: string): {
   productId: string | null;
   tags: string[];
   cadSpreadsheetId: string | null;
+  clientCode: string | null;
 } {
   const html = fs.readFileSync(filePath, "utf8");
   const title = readMetaTitleFromHtml(html) || path.basename(filePath);
   const productId = extractProductId(title);
   const metaTags = normalizeTagList(readMetaItempropTagsFromHtml(html).join(","));
+  const fileNameClientCode = findClientCodeFromFileName(filePath);
   return {
     productId: looksLikeProductId(productId) ? productId : null,
     tags: metaTags,
     cadSpreadsheetId: looksLikeProductId(productId)
       ? findCadDetailsSpreadsheetIdFromHtml(html, productId)
       : null,
+    clientCode: fileNameClientCode ?? findClientCodeFromHtml(html),
   };
 }
 
@@ -1818,7 +2226,8 @@ export async function runLocalFolderProductImport(options: {
   if (!options.driveDestinationFolderId) {
     throw new Error("Please provide a Google Workspace Shared Drive destination folder.");
   }
-  await assertSharedDriveDestinationFolder(drive, options.driveDestinationFolderId);
+  const driveDestinationFolderId = options.driveDestinationFolderId;
+  await assertSharedDriveDestinationFolder(drive, driveDestinationFolderId);
   const tempDir = path.join(os.tmpdir(), `ivory-local-import-${Date.now()}`);
   if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
@@ -1831,19 +2240,42 @@ export async function runLocalFolderProductImport(options: {
   let quotesGenerated = 0;
   const quoteErrors: { productId: string; error: string }[] = [];
 
-  for (const htmlPath of htmlFiles) {
+  const processLocalHtml = async (
+    htmlPath: string,
+    htmlIndex: number
+  ): Promise<{
+    productId: string;
+    status?: ImportProductResult;
+    errors: { productId: string; error: string }[];
+    driveSyncErrors: { productId: string; error: string }[];
+    tagOverrideApplied: boolean;
+    quoteGenerated: boolean;
+    quoteErrors: { productId: string; error: string }[];
+  }> => {
     const parsed = readLocalProductHtml(htmlPath);
     const productId = parsed.productId;
     if (!productId) {
-      errors.push({ productId: path.basename(htmlPath), error: "Could not identify Style No. from HTML." });
-      continue;
+      return {
+        productId: path.basename(htmlPath),
+        errors: [{ productId: path.basename(htmlPath), error: "Could not identify Style No. from HTML." }],
+        driveSyncErrors: [],
+        tagOverrideApplied: false,
+        quoteGenerated: false,
+        quoteErrors: [],
+      };
     }
 
+    const productErrors: { productId: string; error: string }[] = [];
+    const productDriveSyncErrors: { productId: string; error: string }[] = [];
+    const productQuoteErrors: { productId: string; error: string }[] = [];
     const imagePaths: { path: string; name: string }[] = [];
     let excelPath: string | null = null;
+    let status: ImportProductResult | undefined;
+    let quoteGenerated = false;
     const zipPath = findMatchingZipForProduct(productId, htmlPath, zipFiles);
-    const productTempDir = path.join(tempDir, sanitizeFileName(productId));
+    const productTempDir = path.join(tempDir, `${sanitizeFileName(productId)}-${htmlIndex}`);
     try {
+      if (!fs.existsSync(productTempDir)) fs.mkdirSync(productTempDir, { recursive: true });
       if (parsed.cadSpreadsheetId) {
         excelPath = path.join(productTempDir, `${sanitizeFileName(productId)}-cad-details.xlsx`);
         await downloadSpreadsheetAsXlsxToPath(drive, parsed.cadSpreadsheetId, excelPath);
@@ -1857,7 +2289,7 @@ export async function runLocalFolderProductImport(options: {
             .map((filePath) => ({ path: filePath, name: path.basename(filePath) }))
         );
       } else {
-        errors.push({ productId, error: "Matching ZIP file not found; product will import without images." });
+        productErrors.push({ productId, error: "Matching ZIP file not found; product will import without images." });
       }
 
       const result = await processProduct(
@@ -1868,32 +2300,23 @@ export async function runLocalFolderProductImport(options: {
         imagePaths,
         { tagOverride: parsed.tags, includeAllImages: true }
       );
-      if (parsed.tags.length > 0) tagOverridesApplied++;
+      status = result.status;
       switch (result.status) {
-        case "CREATE":
-          created++;
-          break;
-        case "UPDATE":
-          updated++;
-          break;
-        case "SKIP":
-          skipped++;
-          break;
         case "ERRORED":
-          errors.push({ productId, error: result.error || "Product import failed" });
+          productErrors.push({ productId, error: result.error || "Product import failed" });
           break;
       }
       if (result.status === "CREATE" || result.status === "UPDATE") {
         try {
           await archiveLocalProductAssetsToDrive(
             drive,
-            options.driveDestinationFolderId,
+            driveDestinationFolderId,
             productId,
             excelPath,
             imagePaths
           );
         } catch (archiveErr) {
-          driveSyncErrors.push({
+          productDriveSyncErrors.push({
             productId,
             error: archiveErr instanceof Error ? archiveErr.message : String(archiveErr),
           });
@@ -1901,25 +2324,70 @@ export async function runLocalFolderProductImport(options: {
       }
       if (result.status === "CREATE" || result.status === "UPDATE") {
         try {
-          const { buffer, fileName } = await generateProductQuote(productId);
+          const { buffer } = await generateProductQuote(productId);
+          const withReturnedUnusedGoods =
+            result.returnedUnusedGoodsRows && result.returnedUnusedGoodsRows.length > 0
+              ? await applyReturnedUnusedGoodsToQuoteBuffer(
+                  buffer,
+                  result.returnedUnusedGoodsRows
+                )
+              : buffer;
+          const quoteBuffer = await applyClientCodeToQuoteBuffer(
+            withReturnedUnusedGoods,
+            parsed.clientCode
+          );
           await archiveQuoteToDrive(
             drive,
-            options.driveDestinationFolderId,
+            driveDestinationFolderId,
             productId,
-            buffer,
-            fileName
+            quoteBuffer,
+            buildQuoteFileNames(productId, parsed.clientCode)
           );
-          quotesGenerated++;
+          quoteGenerated = true;
         } catch (quoteErr) {
-          quoteErrors.push({
+          productQuoteErrors.push({
             productId,
             error: quoteErr instanceof Error ? quoteErr.message : String(quoteErr),
           });
         }
       }
     } catch (err) {
-      errors.push({ productId, error: err instanceof Error ? err.message : String(err) });
+      productErrors.push({ productId, error: err instanceof Error ? err.message : String(err) });
     }
+    return {
+      productId,
+      status,
+      errors: productErrors,
+      driveSyncErrors: productDriveSyncErrors,
+      tagOverrideApplied: parsed.tags.length > 0,
+      quoteGenerated,
+      quoteErrors: productQuoteErrors,
+    };
+  };
+
+  const outcomes = await mapConcurrent(
+    htmlFiles,
+    PRODUCT_IMPORT_CONCURRENCY,
+    processLocalHtml
+  );
+
+  for (const outcome of outcomes) {
+    switch (outcome.status) {
+      case "CREATE":
+        created++;
+        break;
+      case "UPDATE":
+        updated++;
+        break;
+      case "SKIP":
+        skipped++;
+        break;
+    }
+    if (outcome.tagOverrideApplied) tagOverridesApplied++;
+    if (outcome.quoteGenerated) quotesGenerated++;
+    errors.push(...outcome.errors);
+    driveSyncErrors.push(...outcome.driveSyncErrors);
+    quoteErrors.push(...outcome.quoteErrors);
   }
 
   try {
@@ -1968,6 +2436,22 @@ function findProductIdForImportFile(file: DriveFile, oneClickImport: boolean): s
   const productId = extractProductId(file.name);
   if (!oneClickImport || looksLikeProductId(productId)) return productId;
   return null;
+}
+
+function imageMatchesProductId(imageName: string, productId: string): boolean {
+  return extractProductId(imageName).toUpperCase() === productId.toUpperCase();
+}
+
+function sortProductImagesForImport(
+  images: { path: string; name: string }[],
+  productId: string
+): void {
+  images.sort((a, b) => {
+    const aMatches = imageMatchesProductId(a.name, productId);
+    const bMatches = imageMatchesProductId(b.name, productId);
+    if (aMatches !== bMatches) return aMatches ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
 }
 
 function mergeTagMaps(target: Map<string, string[]>, source: Map<string, string[]>): void {

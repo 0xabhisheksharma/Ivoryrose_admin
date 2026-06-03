@@ -81,6 +81,10 @@ export default function AdminUsersPage() {
     setLoading(true);
     setError(null);
     try {
+      // Intentional full-list read: this collection is limited to dashboard
+      // administrators, and the current role editor expects the complete set.
+      // Keep this route client-compatible unless a server-backed paginated
+      // users API is added.
       const snap = await getDocs(query(collection(db, COLLECTION_ADMIN_USERS), orderBy("email")));
       setUsers(snap.docs.map((item) => toProfile(item.id, item.data())));
     } catch (err) {

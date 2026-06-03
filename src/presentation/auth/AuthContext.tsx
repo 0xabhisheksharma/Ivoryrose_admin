@@ -108,7 +108,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    const auth = getClientAuth();
+    let auth;
+    try {
+      auth = getClientAuth();
+    } catch (err) {
+      setUser(null);
+      setProfile(null);
+      setError(err instanceof Error ? err.message : "Firebase client is not configured.");
+      setLoading(false);
+      return;
+    }
+
     return onAuthStateChanged(auth, async (nextUser) => {
       setLoading(true);
       setUser(nextUser);
