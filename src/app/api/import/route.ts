@@ -3,7 +3,7 @@ import { getAdminIdFromRequest } from "@/shared/auth/admin-id";
 import { logAdminAction } from "@/application/use-cases/admin-logs/logAdminAction";
 import { runImport } from "@/application/use-cases/products/runImport";
 import { requireAdminPermission } from "@/infrastructure/auth/server-auth";
-import { parseDriveFolderId } from "@/shared/utils/drive";
+import { resolveImportDestinationFolderId } from "@/shared/utils/resolve-import-destination";
 
 export async function POST(request: Request) {
   const auth = await requireAdminPermission(request, "imports.run");
@@ -25,19 +25,13 @@ export async function POST(request: Request) {
       body.driveDestinationFolderLink && typeof body.driveDestinationFolderLink === "string"
         ? body.driveDestinationFolderLink.trim()
         : "";
-    const driveDestinationFolderId = driveDestinationFolderLink
-      ? parseDriveFolderId(driveDestinationFolderLink) ?? undefined
-      : undefined;
+    const driveDestinationFolderId = resolveImportDestinationFolderId(
+      driveDestinationFolderLink
+    );
 
     if (!localFolderPath) {
       return NextResponse.json(
         { error: "Please enter a local folder path." },
-        { status: 400 }
-      );
-    }
-    if (!driveDestinationFolderId) {
-      return NextResponse.json(
-        { error: "Please paste a valid Google Workspace Shared Drive destination folder link or folder ID." },
         { status: 400 }
       );
     }

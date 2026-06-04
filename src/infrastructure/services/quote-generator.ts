@@ -25,6 +25,7 @@ export interface GeneratedProductQuote {
  */
 export async function generateProductQuote(
   productCode: string,
+  options?: { rowsDocId?: string }
 ): Promise<GeneratedProductQuote> {
   if (!QUOTE_INTERNAL_SECRET) {
     throw new Error(
@@ -45,7 +46,10 @@ export async function generateProductQuote(
         "content-type": "application/json",
         "x-internal-secret": QUOTE_INTERNAL_SECRET,
       },
-      body: JSON.stringify({ productCode }),
+      body: JSON.stringify({
+        productCode,
+        ...(options?.rowsDocId ? { rowsDocId: options.rowsDocId } : {}),
+      }),
     });
   } catch (err) {
     throw new Error(

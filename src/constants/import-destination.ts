@@ -1,0 +1,4 @@
+export const DEFAULT_IMPORT_DESTINATION_FOLDER_ID =
+  "1oZISDJb3U9L7mWRvObXTdOz9ev4xAMVp";
+
+export const DEFAULT_IMPORT_DESTINATION_FOLDER_LINK = `https://drive.google.com/drive/folders/${DEFAULT_IMPORT_DESTINATION_FOLDER_ID}`;

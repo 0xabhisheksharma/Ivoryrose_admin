@@ -8,10 +8,10 @@ import { ConfirmDialog } from "@/presentation/components/ui/ConfirmDialog";
 import { Card, CardHeader, CardContent } from "@/presentation/components/ui/Card";
 import { Button } from "@/presentation/components/ui/Button";
 import { AdminIcon } from "@/presentation/components/admin/AdminIcons";
+import { DEFAULT_IMPORT_DESTINATION_FOLDER_LINK } from "@/constants/import-destination";
 
 const LOCAL_IMPORT_FOLDER_KEY = "ivory-admin.localImport.folderPath";
-const DEFAULT_IMPORT_DESTINATION_FOLDER_URL =
-  "https://drive.google.com/drive/folders/1oZISDJb3U9L7mWRvObXTdOz9ev4xAMVp?usp=drive_link";
+const LOCAL_IMPORT_DESTINATION_KEY = "ivory-admin.import.destinationFolderLink";
 
 function SummaryTile({
   label,
@@ -43,9 +43,13 @@ export function AdminImportContent() {
       ? ""
       : window.localStorage.getItem(LOCAL_IMPORT_FOLDER_KEY) ?? ""
   );
-  const [destinationFolderLink, setDestinationFolderLink] = useState(
-    DEFAULT_IMPORT_DESTINATION_FOLDER_URL
-  );
+  const [destinationFolderLink, setDestinationFolderLink] = useState(() => {
+    if (typeof window === "undefined") return DEFAULT_IMPORT_DESTINATION_FOLDER_LINK;
+    return (
+      window.localStorage.getItem(LOCAL_IMPORT_DESTINATION_KEY) ??
+      DEFAULT_IMPORT_DESTINATION_FOLDER_LINK
+    );
+  });
   const [validationError, setValidationError] = useState<string | null>(null);
   const {
     runImport,
@@ -64,6 +68,13 @@ export function AdminImportContent() {
   useEffect(() => {
     window.localStorage.setItem(LOCAL_IMPORT_FOLDER_KEY, folderPath);
   }, [folderPath]);
+
+  useEffect(() => {
+    window.localStorage.setItem(LOCAL_IMPORT_DESTINATION_KEY, destinationFolderLink);
+  }, [destinationFolderLink]);
+
+  const destinationDiffersFromDefault =
+    destinationFolderLink.trim() !== DEFAULT_IMPORT_DESTINATION_FOLDER_LINK;
 
   const importStatus = useMemo(() => {
     if (!result) return null;
@@ -92,10 +103,6 @@ export function AdminImportContent() {
     setValidationError(null);
     if (!trimmed) {
       setValidationError("Please enter a local folder path.");
-      return;
-    }
-    if (!destinationFolderLink.trim()) {
-      setValidationError("Please enter the Google Drive destination folder link.");
       return;
     }
     if (preview && preview.htmlFiles === 0) {
@@ -158,9 +165,24 @@ export function AdminImportContent() {
           </div>
 
           <div>
-            <label className="mb-1 block text-sm font-medium text-zinc-700">
-              Google Workspace Shared Drive destination folder
-            </label>
+            <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+              <label className="block text-sm font-medium text-zinc-700">
+                Google Workspace Shared Drive destination folder
+              </label>
+              {destinationDiffersFromDefault && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDestinationFolderLink(DEFAULT_IMPORT_DESTINATION_FOLDER_LINK);
+                    setValidationError(null);
+                    clearPreview();
+                  }}
+                  className="text-xs font-medium text-[#8B7355] hover:text-[#6B563F] hover:underline"
+                >
+                  Reset to default
+                </button>
+              )}
+            </div>
             <input
               type="url"
               value={destinationFolderLink}
@@ -169,11 +191,12 @@ export function AdminImportContent() {
                 setValidationError(null);
                 clearPreview();
               }}
-              placeholder="https://drive.google.com/drive/folders/..."
+              placeholder={DEFAULT_IMPORT_DESTINATION_FOLDER_LINK}
               className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-500 focus:border-[#D4AF37] focus:outline-none focus:ring-2 focus:ring-[#D4AF37]/20"
             />
             <p className="mt-2 text-xs text-zinc-500">
-              Use a Shared Drive folder shared with the Google service account as Content manager.
+              Imports upload to the default Shared Drive folder unless you change it below. The
+              folder must be shared with the Google service account as Content manager.
             </p>
           </div>
 

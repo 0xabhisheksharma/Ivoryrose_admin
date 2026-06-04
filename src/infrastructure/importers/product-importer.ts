@@ -612,7 +612,6 @@ function changedProductFields(
 // -------------------------
 type DriveFile = { id: string; name: string; mimeType?: string; pathParts?: string[] };
 const DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder";
-const QUOTE_DRIVE_FOLDER_NAME = "Quo-Dc";
 const HTML_MIMES = new Set(["text/html", "application/xhtml+xml"]);
 
 async function listDriveFiles(
@@ -887,6 +886,29 @@ function findCadDetailsSpreadsheetIdFromHtml(html: string, productId: string): s
   });
   if (!cadAnchor) return null;
   return parseDriveFileIdFromText(cadAnchor.href);
+}
+
+function findActualDetailsSpreadsheetIdFromHtml(html: string, productId: string): string | null {
+  const anchors = readHtmlAnchors(html);
+  const normalizedProductId = productId.toLowerCase();
+  // The Actual sheet link is typically labelled like "ET0528-ACTUAL" (productId + "actual"),
+  // so match on "actual" and prefer the anchor that also contains the productId.
+  const actualAnchor = anchors.find((anchor) => {
+    const text = anchor.text.toLowerCase();
+    return (
+      anchor.href.includes("docs.google.com/spreadsheets") &&
+      text.includes(normalizedProductId) &&
+      text.includes("actual")
+    );
+  }) ?? anchors.find((anchor) => {
+    const text = anchor.text.toLowerCase();
+    return (
+      anchor.href.includes("docs.google.com/spreadsheets") &&
+      text.includes("actual")
+    );
+  });
+  if (!actualAnchor) return null;
+  return parseDriveFileIdFromText(actualAnchor.href);
 }
 
 function normalizeTagList(value: string): string[] {
@@ -1307,7 +1329,7 @@ async function archiveQuoteToDrive(
   const quotesFolderId = await ensureDriveFolder(
     drive,
     productFolderId,
-    QUOTE_DRIVE_FOLDER_NAME
+    "Quo/Dc"
   );
   for (const fileName of fileNames) {
     await uploadBufferToDriveFolder(
@@ -1709,9 +1731,66 @@ function localImageSignature(image: { path: string; name: string }): string {
 // -------------------------
 export type ImportProductResult = "CREATE" | "UPDATE" | "SKIP" | "ERRORED";
 
+const ACTUAL_FIRESTORE_DOC_ID = "actual";
+
+function hasActualAssumingNetWt(value: number | string | null): boolean {
+  return (
+    value !== null &&
+    value !== "" &&
+    !(typeof value === "number" && Number.isNaN(value))
+  );
+}
+
+function hasActualDetailDataToPersist(
+  actualStoneSummary: StoneRow[],
+  actualReturnedUnusedGoodsData: ReturnedUnusedGoodsData | null,
+  actualAssumingNetWt: number | string | null
+): boolean {
+  return (
+    actualStoneSummary.length > 0 ||
+    !!actualReturnedUnusedGoodsData?.sheetFound ||
+    hasActualAssumingNetWt(actualAssumingNetWt)
+  );
+}
+
+async function persistActualDetailToFirestore(
+  productRef: admin.firestore.DocumentReference,
+  actualStoneSummary: StoneRow[],
+  actualReturnedUnusedGoodsData: ReturnedUnusedGoodsData | null,
+  actualAssumingNetWt: number | string | null
+): Promise<void> {
+  const actualRowsRef = productRef.collection("rows").doc(ACTUAL_FIRESTORE_DOC_ID);
+  const actualReturnedUnusedGoodsRef = productRef
+    .collection("returnedUnusedGoods")
+    .doc(ACTUAL_FIRESTORE_DOC_ID);
+
+  const hasAssumingNetWt = hasActualAssumingNetWt(actualAssumingNetWt);
+  if (actualStoneSummary.length > 0 || hasAssumingNetWt) {
+    const actualRowsPayload: Record<string, unknown> = {
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+    if (actualStoneSummary.length > 0) {
+      actualRowsPayload.rows = actualStoneSummary;
+    }
+    if (hasAssumingNetWt) {
+      actualRowsPayload.assumingNetWt = actualAssumingNetWt;
+    }
+    await actualRowsRef.set(actualRowsPayload, { merge: true });
+  }
+  if (actualReturnedUnusedGoodsData?.sheetFound) {
+    await actualReturnedUnusedGoodsRef.set({
+      rows: actualReturnedUnusedGoodsData.rows,
+      sourceSheetName: actualReturnedUnusedGoodsData.sourceSheetName,
+      availableSheetNames: actualReturnedUnusedGoodsData.availableSheetNames,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  }
+}
+
 type ProcessProductOptions = {
   tagOverride?: string[];
   includeAllImages?: boolean;
+  actualDetailExcelPath?: string | null;
 };
 
 async function processProduct(
@@ -1726,6 +1805,7 @@ async function processProduct(
   productId: string;
   error?: string;
   returnedUnusedGoodsRows?: ReturnedUnusedGoodsRow[];
+  actualDetailReturnedUnusedGoodsRows?: ReturnedUnusedGoodsRow[];
 }> {
   const processingErrors: string[] = [];
   let rows: StoneRow[] = [];
@@ -1748,6 +1828,32 @@ async function processProduct(
       returnedUnusedGoodsData = await readReturnedUnusedGoodsFile(excelPath);
     } catch (err) {
       processingErrors.push(`Returned/Unused Goods read: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // Actual Detail is kept fully separate from CAD Details (no override/merge).
+  const actualDetailExcelPath = options.actualDetailExcelPath ?? null;
+  let actualDetailReturnedUnusedGoodsRows: ReturnedUnusedGoodsRow[] = [];
+  const actualStoneSummary: StoneRow[] = [];
+  let actualReturnedUnusedGoodsData: ReturnedUnusedGoodsData | null = null;
+  let actualAssumingNetWt: number | string | null = null;
+  if (actualDetailExcelPath && fs.existsSync(actualDetailExcelPath)) {
+    try {
+      const actualDetailData = await readExcelFile(actualDetailExcelPath);
+      actualAssumingNetWt = actualDetailData.assumingNetWt ?? null;
+      for (const r of actualDetailData.rows || []) {
+        if (isBlankRow([r.typ, r.shp, "", "", "", "", "", r.qty, r.twt, "", ""])) continue;
+        actualStoneSummary.push(r);
+      }
+      actualReturnedUnusedGoodsData = await readReturnedUnusedGoodsFile(actualDetailExcelPath);
+      if (
+        actualReturnedUnusedGoodsData.sheetFound &&
+        actualReturnedUnusedGoodsData.rows.length > 0
+      ) {
+        actualDetailReturnedUnusedGoodsRows = actualReturnedUnusedGoodsData.rows;
+      }
+    } catch (err) {
+      processingErrors.push(`Actual Detail read: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -1931,12 +2037,35 @@ async function processProduct(
         processingErrors.push(`Save Returned/Unused Goods: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+    if (
+      actualDetailExcelPath &&
+      hasActualDetailDataToPersist(
+        actualStoneSummary,
+        actualReturnedUnusedGoodsData,
+        actualAssumingNetWt
+      )
+    ) {
+      try {
+        await persistActualDetailToFirestore(
+          productRef,
+          actualStoneSummary,
+          actualReturnedUnusedGoodsData,
+          actualAssumingNetWt
+        );
+      } catch (err) {
+        processingErrors.push(`Save Actual Detail: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     return {
       status: "CREATE",
       productId,
       returnedUnusedGoodsRows: returnedUnusedGoodsData?.sheetFound
         ? returnedUnusedGoodsData.rows
         : undefined,
+      actualDetailReturnedUnusedGoodsRows:
+        actualDetailReturnedUnusedGoodsRows.length > 0
+          ? actualDetailReturnedUnusedGoodsRows
+          : undefined,
     };
   }
 
@@ -1951,12 +2080,35 @@ async function processProduct(
     console.log("[import-products] product unchanged; skipped Firestore product write", {
       productId,
     });
+    if (
+      actualDetailExcelPath &&
+      hasActualDetailDataToPersist(
+        actualStoneSummary,
+        actualReturnedUnusedGoodsData,
+        actualAssumingNetWt
+      )
+    ) {
+      try {
+        await persistActualDetailToFirestore(
+          productRef,
+          actualStoneSummary,
+          actualReturnedUnusedGoodsData,
+          actualAssumingNetWt
+        );
+      } catch (err) {
+        processingErrors.push(`Save Actual Detail: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     return {
       status: "SKIP",
       productId,
       returnedUnusedGoodsRows: returnedUnusedGoodsData?.sheetFound
         ? returnedUnusedGoodsData.rows
         : undefined,
+      actualDetailReturnedUnusedGoodsRows:
+        actualDetailReturnedUnusedGoodsRows.length > 0
+          ? actualDetailReturnedUnusedGoodsRows
+          : undefined,
     };
   }
 
@@ -1997,12 +2149,35 @@ async function processProduct(
       { merge: true }
     );
   }
+  if (
+    actualDetailExcelPath &&
+    hasActualDetailDataToPersist(
+      actualStoneSummary,
+      actualReturnedUnusedGoodsData,
+      actualAssumingNetWt
+    )
+  ) {
+    try {
+      await persistActualDetailToFirestore(
+        productRef,
+        actualStoneSummary,
+        actualReturnedUnusedGoodsData,
+        actualAssumingNetWt
+      );
+    } catch (err) {
+      processingErrors.push(`Save Actual Detail: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   return {
     status: "UPDATE",
     productId,
     returnedUnusedGoodsRows: returnedUnusedGoodsData?.sheetFound
       ? returnedUnusedGoodsData.rows
       : undefined,
+    actualDetailReturnedUnusedGoodsRows:
+      actualDetailReturnedUnusedGoodsRows.length > 0
+        ? actualDetailReturnedUnusedGoodsRows
+        : undefined,
   };
 }
 
@@ -2065,6 +2240,7 @@ function readLocalProductHtml(filePath: string): {
   productId: string | null;
   tags: string[];
   cadSpreadsheetId: string | null;
+  actualDetailSpreadsheetId: string | null;
   clientCode: string | null;
 } {
   const html = fs.readFileSync(filePath, "utf8");
@@ -2077,6 +2253,9 @@ function readLocalProductHtml(filePath: string): {
     tags: metaTags,
     cadSpreadsheetId: looksLikeProductId(productId)
       ? findCadDetailsSpreadsheetIdFromHtml(html, productId)
+      : null,
+    actualDetailSpreadsheetId: looksLikeProductId(productId)
+      ? findActualDetailsSpreadsheetIdFromHtml(html, productId)
       : null,
     clientCode: fileNameClientCode ?? findClientCodeFromHtml(html),
   };
@@ -2126,7 +2305,8 @@ function extractZipToFolder(zipPath: string, destinationPath: string): void {
 async function downloadSpreadsheetAsXlsxToPath(
   drive: ReturnType<typeof google.drive>,
   spreadsheetId: string,
-  destinationPath: string
+  destinationPath: string,
+  label = "CAD Details"
 ): Promise<void> {
   const dir = path.dirname(destinationPath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -2157,7 +2337,7 @@ async function downloadSpreadsheetAsXlsxToPath(
     } catch (publicErr) {
       const publicMessage = publicErr instanceof Error ? publicErr.message : String(publicErr);
       throw new Error(
-        `CAD Details download failed for spreadsheet ${spreadsheetId}. Drive API: ${driveMessage}. Public export: ${publicMessage}. Share the CAD Details sheet with the Google service account or make the export link accessible.`
+        `${label} download failed for spreadsheet ${spreadsheetId}. Drive API: ${driveMessage}. Public export: ${publicMessage}. Share the ${label} sheet with the Google service account or make the export link accessible.`
       );
     }
   }
@@ -2168,7 +2348,8 @@ async function archiveLocalProductAssetsToDrive(
   destinationFolderId: string,
   productId: string,
   excelPath: string | null,
-  imagePaths: { path: string; name: string }[]
+  imagePaths: { path: string; name: string }[],
+  actualDetailExcelPath: string | null = null
 ): Promise<void> {
   const productFolderId = await ensureDriveFolder(drive, destinationFolderId, sanitizeFileName(productId));
   const cadFolderId = await ensureDriveFolder(drive, productFolderId, "CAD Details");
@@ -2187,6 +2368,23 @@ async function archiveLocalProductAssetsToDrive(
     } catch (err) {
       throw new Error(
         `CAD upload failed (${cadFileName}): ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
+  if (actualDetailExcelPath && fs.existsSync(actualDetailExcelPath)) {
+    const actualDetailFileName = `${sanitizeFileName(productId)}-actual-details.xlsx`;
+    try {
+      await uploadLocalFileToDriveFolder(
+        drive,
+        cadFolderId,
+        actualDetailExcelPath,
+        actualDetailFileName,
+        XLSX_MIME
+      );
+    } catch (err) {
+      throw new Error(
+        `Actual Detail upload failed (${actualDetailFileName}): ${err instanceof Error ? err.message : String(err)}`
       );
     }
   }
@@ -2271,6 +2469,7 @@ export async function runLocalFolderProductImport(options: {
     const productQuoteErrors: { productId: string; error: string }[] = [];
     const imagePaths: { path: string; name: string }[] = [];
     let excelPath: string | null = null;
+    let actualDetailPath: string | null = null;
     let status: ImportProductResult | undefined;
     let quoteGenerated = false;
     const zipPath = findMatchingZipForProduct(productId, htmlPath, zipFiles);
@@ -2280,6 +2479,28 @@ export async function runLocalFolderProductImport(options: {
       if (parsed.cadSpreadsheetId) {
         excelPath = path.join(productTempDir, `${sanitizeFileName(productId)}-cad-details.xlsx`);
         await downloadSpreadsheetAsXlsxToPath(drive, parsed.cadSpreadsheetId, excelPath);
+      }
+      if (parsed.actualDetailSpreadsheetId) {
+        const candidateActualDetailPath = path.join(
+          productTempDir,
+          `${sanitizeFileName(productId)}-actual-details.xlsx`
+        );
+        try {
+          await downloadSpreadsheetAsXlsxToPath(
+            drive,
+            parsed.actualDetailSpreadsheetId,
+            candidateActualDetailPath,
+            "Actual Detail"
+          );
+          actualDetailPath = candidateActualDetailPath;
+        } catch (actualDetailErr) {
+          // Non-fatal: the Actual Detail sheet is optional. Skip it so CAD import and
+          // quote generation still proceed for this product.
+          productErrors.push({
+            productId,
+            error: actualDetailErr instanceof Error ? actualDetailErr.message : String(actualDetailErr),
+          });
+        }
       }
       if (zipPath) {
         extractZipToFolder(zipPath, productTempDir);
@@ -2299,7 +2520,7 @@ export async function runLocalFolderProductImport(options: {
         excelPath,
         productId,
         imagePaths,
-        { tagOverride: parsed.tags, includeAllImages: true }
+        { tagOverride: parsed.tags, includeAllImages: true, actualDetailExcelPath: actualDetailPath }
       );
       status = result.status;
       switch (result.status) {
@@ -2314,7 +2535,8 @@ export async function runLocalFolderProductImport(options: {
             driveDestinationFolderId,
             productId,
             excelPath,
-            imagePaths
+            imagePaths,
+            actualDetailPath
           );
         } catch (archiveErr) {
           productDriveSyncErrors.push({
@@ -2323,27 +2545,71 @@ export async function runLocalFolderProductImport(options: {
           });
         }
       }
-      if (result.status === "CREATE" || result.status === "UPDATE") {
+      const shouldGenerateQuotes =
+        result.status === "CREATE" ||
+        result.status === "UPDATE" ||
+        (result.status === "SKIP" && !!actualDetailPath);
+
+      if (shouldGenerateQuotes) {
         try {
-          const { buffer } = await generateProductQuote(productId);
-          const withReturnedUnusedGoods =
-            result.returnedUnusedGoodsRows && result.returnedUnusedGoodsRows.length > 0
-              ? await applyReturnedUnusedGoodsToQuoteBuffer(
-                  buffer,
-                  result.returnedUnusedGoodsRows
-                )
-              : buffer;
-          const quoteBuffer = await applyClientCodeToQuoteBuffer(
-            withReturnedUnusedGoods,
+          const [cadQuoteFileName, actualQuoteFileName] = buildQuoteFileNames(
+            productId,
             parsed.clientCode
+          );
+
+          const buildQuoteBuffer = async (
+            baseBuffer: Buffer,
+            returnedUnusedGoodsRows: ReturnedUnusedGoodsRow[] | undefined
+          ): Promise<Buffer> => {
+            const withReturnedUnusedGoods =
+              returnedUnusedGoodsRows && returnedUnusedGoodsRows.length > 0
+                ? await applyReturnedUnusedGoodsToQuoteBuffer(baseBuffer, returnedUnusedGoodsRows)
+                : baseBuffer;
+            return applyClientCodeToQuoteBuffer(withReturnedUnusedGoods, parsed.clientCode);
+          };
+
+          const { buffer: cadBuffer } = await generateProductQuote(productId);
+          const cadQuoteBuffer = await buildQuoteBuffer(
+            cadBuffer,
+            result.returnedUnusedGoodsRows
           );
           await archiveQuoteToDrive(
             drive,
             driveDestinationFolderId,
             productId,
-            quoteBuffer,
-            buildQuoteFileNames(productId, parsed.clientCode)
+            cadQuoteBuffer,
+            [cadQuoteFileName]
           );
+
+          if (actualDetailPath) {
+            const { buffer: actualBaseBuffer } = await generateProductQuote(productId, {
+              rowsDocId: ACTUAL_FIRESTORE_DOC_ID,
+            });
+            const actualQuoteBuffer = await buildQuoteBuffer(
+              actualBaseBuffer,
+              result.actualDetailReturnedUnusedGoodsRows
+            );
+            await archiveQuoteToDrive(
+              drive,
+              driveDestinationFolderId,
+              productId,
+              actualQuoteBuffer,
+              [actualQuoteFileName]
+            );
+          } else {
+            const actualQuoteBuffer = await buildQuoteBuffer(
+              cadBuffer,
+              result.returnedUnusedGoodsRows
+            );
+            await archiveQuoteToDrive(
+              drive,
+              driveDestinationFolderId,
+              productId,
+              actualQuoteBuffer,
+              [actualQuoteFileName]
+            );
+          }
+
           quoteGenerated = true;
         } catch (quoteErr) {
           productQuoteErrors.push({

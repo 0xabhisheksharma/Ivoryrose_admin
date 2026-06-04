@@ -36,6 +36,7 @@ Required values are loaded from `.env.local` (gitignored). Notable variables:
 - `GOOGLE_SERVICE_ACCOUNT_JSON` / `GOOGLE_SERVICE_ACCOUNT_PATH` – Google service account for Drive / Sheets access (product import, tag sync, quotation upload).
 - `RATE_ENCRYPTION_KEY` – AES-256 key used to decrypt the `Rate` collection's `Rs_Rate` values.
 - `DRIVE_FOLDER_ID` – Default Drive folder ID used by tag sync and bulk product import.
+- Local-folder import (`/admin/import`) uploads to Shared Drive folder `1oZISDJb3U9L7mWRvObXTdOz9ev4xAMVp` by default (`https://drive.google.com/drive/folders/1oZISDJb3U9L7mWRvObXTdOz9ev4xAMVp`). Optional overrides: `IMPORT_DESTINATION_FOLDER_ID` or `IMPORT_DESTINATION_FOLDER_LINK`.
 - `QUOTE_GENERATOR_URL` – HTTPS endpoint of the `generateQuoteInternal` Cloud Function in `IvoryRoseApp-functions`. Defaults to `https://us-central1-ivory-rose.cloudfunctions.net/generateQuoteInternal`.
 - `QUOTE_INTERNAL_SECRET` – Shared secret used by the local-folder importer to authenticate against `generateQuoteInternal`. Must match the value set via `firebase functions:secrets:set QUOTE_INTERNAL_SECRET` in the functions project.
 
@@ -61,9 +62,11 @@ QUOTE_INTERNAL_SECRET
 
 Use the full JSON contents for `FIREBASE_SERVICE_ACCOUNT_JSON` and `GOOGLE_SERVICE_ACCOUNT_JSON`; file paths such as `./firebase-service.json` only work locally. Also add the deployed Vercel domain in Firebase Console under `Authentication > Settings > Authorized domains`.
 
-After a successful local-folder product import (`/admin/import`), the importer calls `generateQuoteInternal` for every product whose status is `CREATE` or `UPDATE`. During import, the importer also looks for a `Returned/Unused Goods` sheet in the imported CAD Details workbook. When present, those returned-goods values are applied to the quotation generated during that same import.
+After a successful local-folder product import (`/admin/import`), the importer calls `generateQuoteInternal` for every product whose status is `CREATE` or `UPDATE`, and also when status is `SKIP` but an Actual Detail sheet was imported. During import, the importer looks for a `Returned/Unused Goods` sheet in the CAD Details and Actual Detail workbooks. When present, those returned-goods values are applied to the corresponding quotation copy.
 
-Each generated quotation is uploaded to the product's `Quo-Dc` folder as two copies named `Quo-{styleNo}-{clientCode}-{currentDate}.xlsx` and `{styleNo}-{clientCode}-{currentDate}.xlsx`; the client code is read from the product HTML. Quotation generation failures are reported in the import summary as warnings and do not abort the import.
+CAD stone rows are stored at `products/{productId}/rows/{productId}`. Actual Detail rows are stored separately at `products/{productId}/rows/actual` (and Actual returned/unused goods at `products/{productId}/returnedUnusedGoods/actual`) without overriding CAD data.
+
+Each generated quotation is uploaded to the product's `Quo/Dc` folder as two copies named `Quo-{styleNo}-{clientCode}-{currentDate}.xlsx` (from CAD Firestore rows) and `{styleNo}-{clientCode}-{currentDate}.xlsx` (from Actual Firestore rows when an Actual sheet link exists in the product HTML). The client code is read from the product HTML. Pass optional `rowsDocId: "actual"` to `generateQuoteInternal` for the Actual-based quote. Quotation generation failures are reported in the import summary as warnings and do not abort the import.
 
 ## Learn More
 

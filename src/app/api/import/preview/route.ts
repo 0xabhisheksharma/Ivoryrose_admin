@@ -3,7 +3,10 @@ import path from "path";
 import { NextResponse } from "next/server";
 import type { LocalImportPreview } from "@/domain/types";
 import { requireAdminPermission } from "@/infrastructure/auth/server-auth";
-import { parseDriveFolderId } from "@/shared/utils/drive";
+import {
+  isInvalidImportDestinationLink,
+  resolveImportDestinationFolderId,
+} from "@/shared/utils/resolve-import-destination";
 
 const MAX_SAMPLE_FILES = 6;
 
@@ -85,9 +88,9 @@ export async function POST(request: Request) {
     }
 
     const scan = scanLocalFolder(localFolderPath);
-    const driveDestinationFolderId = driveDestinationFolderLink
-      ? parseDriveFolderId(driveDestinationFolderLink)
-      : null;
+    const driveDestinationFolderId = resolveImportDestinationFolderId(
+      driveDestinationFolderLink
+    );
     const warnings: string[] = [];
 
     if (scan.htmlFiles === 0) {
@@ -96,8 +99,10 @@ export async function POST(request: Request) {
     if (scan.zipFiles === 0) {
       warnings.push("No ZIP files were found; products may import without images.");
     }
-    if (driveDestinationFolderLink && !driveDestinationFolderId) {
-      warnings.push("The destination folder link does not look like a valid Drive folder link or ID.");
+    if (isInvalidImportDestinationLink(driveDestinationFolderLink)) {
+      warnings.push(
+        "The destination folder link does not look valid; the default Shared Drive folder will be used."
+      );
     }
 
     const preview: LocalImportPreview = {
